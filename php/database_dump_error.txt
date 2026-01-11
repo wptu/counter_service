@@ -1,0 +1,1 @@
+Note: mysqldump command failed (exit 127), likely missing in container. Recommend manual export via Adminer or similar if needed.

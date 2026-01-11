@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  db:
+    image: mariadb:11
+    container_name: shift_scheduler_db
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secure_password_2026
+      MYSQL_DATABASE: shift_scheduler
+      MYSQL_USER: scheduler_user
+      MYSQL_PASSWORD: scheduler_secure_pass_2026
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3307:3306"
+    restart: unless-stopped
+    networks:
+      - scheduler_network
+
+  web:
+    build: .
+    container_name: shift_scheduler
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/var/www/html
+      - ./public:/var/www/html/public
+    environment:
+      - TZ=Asia/Bangkok
+      - LANG=th_TH.UTF-8
+      - DB_HOST=db
+      - DB_NAME=shift_scheduler
+      - DB_USER=scheduler_user
+      - DB_PASS=scheduler_secure_pass_2026
+    depends_on:
+      - db
+    restart: unless-stopped
+    networks:
+      - scheduler_network
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: shift_scheduler_pma
+    environment:
+      PMA_HOST: db
+      PMA_USER: scheduler_user
+      PMA_PASSWORD: scheduler_secure_pass_2026
+    ports:
+      - "8081:80"
+    depends_on:
+      - db
+    networks:
+      - scheduler_network
+
+volumes:
+  db_data:
+
+
+networks:
+  scheduler_network:
+    driver: bridge

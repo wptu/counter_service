@@ -1,0 +1,1432 @@
+/************************************
+ * EMPLOYEE SCHEDULING FOR 2026 (TH)
+ * อ่านรายชื่อจากชีท "Name list"
+ * TP (Office 1) และ RS (Office 2) พร้อมการกระจายวันในสัปดาห์
+ ************************************/
+
+// วันหยุดราชการ 2026 (ไม่จัดเวร)
+var THAI_HOLIDAYS_2026 = {
+  '2026-01-01': 'วันขึ้นปีใหม่',
+  '2026-01-02': 'วันหยุดพิเศษ (ชดเชยวันขึ้นปีใหม่)',
+  '2026-03-03': 'วันมาฆบูชา',
+  '2026-04-06': 'วันจักรี',
+  '2026-04-13': 'วันสงกรานต์',
+  '2026-04-14': 'วันสงกรานต์',
+  '2026-04-15': 'วันสงกรานต์',
+  '2026-05-04': 'วันฉัตรมงคล',
+  '2026-06-01': 'วันหยุดชดเชยวิสาขบูชา',
+  '2026-06-03': 'วันเฉลิมพระชนมพรรษา พระบรมราชินี',
+  '2026-07-28': 'วันเฉลิมพระชนมพรรษา ร.10',
+  '2026-07-29': 'วันอาสาฬหบูชา',
+  '2026-07-30': 'วันเข้าพรรษา',
+  '2026-08-12': 'วันแม่แห่งชาติ',
+  '2026-10-13': 'วันนวมินทรมหาราช',
+  '2026-10-23': 'วันปิยมหาราช',
+  '2026-12-07': 'วันหยุดชดเชยวันพ่อ',
+  '2026-12-10': 'วันรัฐธรรมนูญ',
+  '2026-12-31': 'วันสิ้นปี'
+};
+
+// วันทำงานพิเศษ (จัดเวรปกติ แต่มีหมายเหตุ)
+var SPECIAL_WORKING_DAYS = {
+  '2026-05-01': 'วันแรงงานแห่งชาติ (จัดเวรปกติ)',
+  '2026-05-11': 'วันพืชมงคล (รอประกาศยืนยันจากราชการ, จัดเวรปกติไปก่อน)'
+};
+
+var THAI_DAYS = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+
+// ---------- MENU ----------
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Scheduling')
+    .addItem('Generate 2026 Schedule', 'generate2026Schedule')
+    .addItem('Generate Analysis Sheets', 'generateAnalysisSheets')
+    .addItem('Generate Holidays Sheet', 'generateHolidaysSheet')
+    .addItem('Generate Monthly Calendars', 'generateMonthlyCalendars')
+    .addItem('Generate Conditions Sheet', 'generateConditionsSheet')
+    .addToUi();
+}
+
+// อ่านชื่อจากชีท "Name list"
+// คอลัมน์ A = รหัส กลุ่ม A, คอลัมน์ B = ชื่อจริง กลุ่ม A
+// คอลัมน์ C = รหัส กลุ่ม B, คอลัมน์ D = ชื่อจริง กลุ่ม B
+function getNameLists_() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName('Name list');
+  if (!sheet) throw new Error('ไม่พบชีท "Name list"');
+
+  var data = sheet.getRange('A2:D50').getValues();
+
+  var A_LIST = [];
+  var B_LIST = [];
+  var STAFF_NAMES = {};
+
+  data.forEach(function(row) {
+    var aCode = row[0] ? String(row[0]).trim() : '';
+    var aName = row[1] ? String(row[1]).trim() : '';
+    var bCode = row[2] ? String(row[2]).trim() : '';
+    var bName = row[3] ? String(row[3]).trim() : '';
+    
+    if (aCode) {
+      A_LIST.push(aCode);
+      STAFF_NAMES[aCode] = aName || aCode; // ใช้รหัสถ้าไม่มีชื่อ
+    }
+    
+    if (bCode) {
+      B_LIST.push(bCode);
+      STAFF_NAMES[bCode] = bName || bCode; // ใช้รหัสถ้าไม่มีชื่อ
+    }
+  });
+
+  // ✅ เรียงลำดับเพื่อให้ได้ผลลัพธ์เดิมทุกครั้ง (deterministic) และเหมือน Python (Numerical)
+  function naturalSort(a, b) {
+    var numA = parseInt(a.replace(/\D/g, ''), 10);
+    var numB = parseInt(b.replace(/\D/g, ''), 10);
+    return numA - numB;
+  }
+  A_LIST.sort(naturalSort);
+  B_LIST.sort(naturalSort);
+
+  if (A_LIST.length === 0 || B_LIST.length === 0)
+    throw new Error('กรุณาใส่รายชื่อในคอลัมน์ A/C ของชีท Name list');
+
+  return { A_LIST: A_LIST, B_LIST: B_LIST, STAFF_NAMES: STAFF_NAMES };
+}
+
+// ฟังก์ชันแปลงรหัสเป็นชื่อที่จะแสดง
+function getDisplayName(staffId, staffNames) {
+  return staffNames[staffId] || staffId;
+}
+
+// ---------- MAIN ----------
+function generate2026Schedule() {
+  var ss = SpreadsheetApp.getActive();
+  var lists = getNameLists_();
+  var A_LIST = lists.A_LIST;
+  var B_LIST = lists.B_LIST;
+  var STAFF_NAMES = lists.STAFF_NAMES;
+
+  var sheetName = 'Schedule2026';
+  var sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+  sheet.clear();
+
+  var tz = ss.getSpreadsheetTimeZone() || 'Asia/Bangkok';
+  var year = 2026;
+  var date = new Date(year, 0, 1);
+
+  var msPerDay = 24 * 60 * 60 * 1000;
+
+  function formatDateKey(d) {
+    return Utilities.formatDate(d, tz, 'yyyy-MM-dd');
+  }
+  function isWeekend(d) {
+    return d.getDay() === 0 || d.getDay() === 6;
+  }
+  function isHoliday(d) {
+    var key = formatDateKey(d);
+    return THAI_HOLIDAYS_2026.hasOwnProperty(key);
+  }
+  function isSpecialWorkingDay(d) {
+    var key = formatDateKey(d);
+    return SPECIAL_WORKING_DAYS.hasOwnProperty(key);
+  }
+  function isWorkingDay(d) {
+    if (isWeekend(d)) return false;
+    if (isSpecialWorkingDay(d)) return true; // จัดเวรปกติ
+
+    // เงื่อนไขเดือน: ม.ค.(0), ก.พ.(1), ก.ค.(6), ส.ค.(7) เข้าเต็มสัปดาห์
+    // เดือนอื่นเข้าเฉพาะ จันทร์(1), อังคาร(2), พฤหัส(4)
+    var month = d.getMonth();
+    var fullWeekMonths = [0, 1, 6, 7];
+    if (fullWeekMonths.indexOf(month) === -1) {
+      var dow = d.getDay();
+      if (dow === 3 || dow === 5) return false; // หยุดพุธ, ศุกร์
+    }
+
+    if (isHoliday(d)) return false;
+    return true;
+  }
+  function dayOfYear(d) {
+    return Math.floor((d - new Date(d.getFullYear(), 0, 1)) / msPerDay);
+  }
+  function getWeekIndex(d) {
+    return Math.floor(dayOfYear(d) / 7);
+  }
+  function daysBetween(d1, d2) {
+    return Math.round((d2 - d1) / msPerDay);
+  }
+
+  // สถิติพนักงาน
+  var allEmployees = A_LIST.concat(B_LIST);
+  var totalShifts = {};
+  var dowCountsAll = {}; // นับรวมทั้ง TP และ RS
+  
+  allEmployees.forEach(name => {
+    totalShifts[name] = 0;
+    dowCountsAll[name] = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}; // จันทร์-ศุกร์ (1-5 ในระบบ JS)
+  });
+
+  // ฟังก์ชันช่วยคำนวณ DoW
+  function getDowRange(counts) {
+    var values = [counts[1], counts[2], counts[3], counts[4], counts[5]];
+    return Math.max.apply(null, values) - Math.min.apply(null, values);
+  }
+  
+  function getMinCount(counts) {
+    var values = [counts[1], counts[2], counts[3], counts[4], counts[5]];
+    return Math.min.apply(null, values);
+  }
+  
+  // ฟังก์ชัน compareScore สำหรับเปรียบเทียบคะแนนแบบ stable (เหมือน Python min())
+  function compareScore(scoreA, scoreB) {
+    for (var i = 0; i < Math.min(scoreA.length, scoreB.length); i++) {
+      if (scoreA[i] < scoreB[i]) return -1;
+      if (scoreA[i] > scoreB[i]) return 1;
+    }
+    return 0;
+  }
+  
+  // ฟังก์ชันหา min stable (เหมือน Python min() - เลือกตัวแรกถ้าเท่ากัน)
+  function findMinStaff(candidates, scoreFunc) {
+    if (candidates.length === 0) return null;
+    
+    var bestStaff = candidates[0];
+    var bestScore = scoreFunc(bestStaff);
+    
+    for (var i = 1; i < candidates.length; i++) {
+      var currentStaff = candidates[i];
+      var currentScore = scoreFunc(currentStaff);
+      
+      if (compareScore(currentScore, bestScore) < 0) {
+        bestStaff = currentStaff;
+        bestScore = currentScore;
+      }
+    }
+    
+    return bestStaff;
+  }
+
+  // ติดตาม last assigned สำหรับ TP
+  var lastAssignedA = [null, null];
+  var lastAssignedB = [null, null];
+  var tpAssign = {};
+  var rsAssign = {};
+  var rsReasons = {};
+  var rsGroupCounts = {A: 0, B: 0};
+
+  // ติดตามจำนวนเวรรายเดือนของกลุ่ม A
+  var monthlyTpCountsA = {};
+  A_LIST.forEach(function(staff) {
+    monthlyTpCountsA[staff] = {};
+    for (var m = 1; m <= 12; m++) {
+      monthlyTpCountsA[staff][m] = 0;
+    }
+  });
+
+  // ติดตามจำนวนเวรรายเดือนของกลุ่ม B
+  var monthlyTpCountsB = {};
+  B_LIST.forEach(function(staff) {
+    monthlyTpCountsB[staff] = {};
+    for (var m = 1; m <= 12; m++) {
+      monthlyTpCountsB[staff][m] = 0;
+    }
+  });
+
+  // รวบรวมวันทำงาน
+  var workingDays = [];
+  var tempDate = new Date(year, 0, 1);
+  while (tempDate.getFullYear() === year) {
+    if (isWorkingDay(tempDate)) {
+      workingDays.push(new Date(tempDate));
+    }
+    tempDate = new Date(tempDate.getTime() + msPerDay);
+  }
+
+  // Logging & Error Check
+  if (workingDays.length === 0) {
+    throw new Error('ไม่พบวันทำงานเลย - ตรวจสอบฟังก์ชัน isWorkingDay');
+  }
+  Logger.log('จำนวนวันทำงานทั้งปี: ' + workingDays.length);
+  Logger.log('เริ่มจัดเวร TP...');
+
+  // STEP 1: จัดเวร TP (Office 1) - A และ B
+  workingDays.forEach(function(d) {
+    var dow = d.getDay(); // 0=Sun, 1=Mon, ..., 5=Fri
+    var dateKey = formatDateKey(d);
+    var currentMonth = d.getMonth() + 1; // 1-12
+    
+    // เลือก A
+    var candidatesA = A_LIST.filter(s => lastAssignedA.indexOf(s) === -1);
+    if (candidatesA.length === 0) {
+      candidatesA = A_LIST.filter(s => s !== lastAssignedA[0]);
+    }
+    if (candidatesA.length === 0) {
+      candidatesA = A_LIST.slice();
+    }
+
+    // กรองตามเงื่อนไขรายเดือน (2-3 ครั้ง/เดือน)
+    var candidatesAFiltered = candidatesA.filter(function(s) {
+      return monthlyTpCountsA[s][currentMonth] < 3;
+    });
+    if (candidatesAFiltered.length === 0) {
+      candidatesAFiltered = candidatesA;
+    }
+    
+    // ใช้ findMinStaff แทน reduce เพื่อให้ stable เหมือน Python min()
+    var chosenA = findMinStaff(candidatesAFiltered, function(staff) {
+      // Monthly Penalty Logic
+      var monthlyCount = monthlyTpCountsA[staff][currentMonth];
+      var monthlyPenalty = 0;
+      if (monthlyCount >= 3) monthlyPenalty = 1000;
+      else if (monthlyCount >= 2) monthlyPenalty = 10;
+      else if (monthlyCount === 1) monthlyPenalty = 0;
+      else monthlyPenalty = -5;
+
+      var tempCounts = {};
+      for (var key in dowCountsAll[staff]) {
+        tempCounts[key] = dowCountsAll[staff][key];
+      }
+      tempCounts[dow] = (tempCounts[dow] || 0) + 1;
+      
+      var range = getDowRange(tempCounts);
+      var currentDow = dowCountsAll[staff][dow] || 0;
+      var total = totalShifts[staff];
+      var minCount = getMinCount(tempCounts);
+      
+      // ใช้ลำดับเดียวกับ Python: monthlyPenalty, range, currentDow, total, -minCount, staff
+      return [monthlyPenalty, range, currentDow, total, -minCount, staff];
+    });
+    
+    // เลือก B
+    var candidatesB = B_LIST.filter(s => lastAssignedB.indexOf(s) === -1);
+    if (candidatesB.length === 0) {
+      candidatesB = B_LIST.filter(s => s !== lastAssignedB[0]);
+    }
+    if (candidatesB.length === 0) {
+      candidatesB = B_LIST.slice();
+    }
+    
+    var chosenB = findMinStaff(candidatesB, function(staff) {
+      // Monthly Penalty Logic for Group B: ต้องไม่เป็น 0
+      var monthlyCount = monthlyTpCountsB[staff][currentMonth];
+      var monthlyPenalty = 0;
+      if (monthlyCount === 0) {
+        monthlyPenalty = -5000; // Priority 1: ยังไม่ได้เข้าเวรเดือนนี้ (ต้องเข้า!)
+      } else {
+        monthlyPenalty = 2000;  // Priority 2: เข้าเวรแล้ว (ให้คนอื่นเข้าก่อน)
+      }
+
+      var tempCounts = {};
+      for (var key in dowCountsAll[staff]) {
+        tempCounts[key] = dowCountsAll[staff][key];
+      }
+      tempCounts[dow] = (tempCounts[dow] || 0) + 1;
+      
+      var range = getDowRange(tempCounts);
+      var currentDow = dowCountsAll[staff][dow] || 0;
+      var total = totalShifts[staff];
+      var minCount = getMinCount(tempCounts);
+      
+      // ลำดับความสำคัญใหม่:
+      // 1. monthlyPenalty (บังคับกระจายรายเดือน)
+      // 2. total (บังคับกระจายยอดรวมให้เท่ากัน - แก้ปัญหา B1=15 vs B6=9)
+      // 3. range (กระจายวันในสัปดาห์)
+      return [monthlyPenalty, total, range, currentDow, -minCount, staff];
+    });
+    
+    tpAssign[dateKey] = {A: chosenA, B: chosenB};
+    
+    // อัพเดทสถิติ
+    dowCountsAll[chosenA][dow] = (dowCountsAll[chosenA][dow] || 0) + 1;
+    dowCountsAll[chosenB][dow] = (dowCountsAll[chosenB][dow] || 0) + 1;
+    totalShifts[chosenA]++;
+    totalShifts[chosenB]++;
+    
+    // อัพเดทจำนวนเวรรายเดือนของกลุ่ม A และ B
+    monthlyTpCountsA[chosenA][currentMonth]++;
+    monthlyTpCountsB[chosenB][currentMonth]++;
+    
+    lastAssignedA = [chosenA, lastAssignedA[0]];
+    lastAssignedB = [chosenB, lastAssignedB[0]];
+  });
+
+  Logger.log('เสร็จสิ้นการจัดเวร TP (' + workingDays.length + ' วัน)');
+  Logger.log('เริ่มจัดเวร RS...');
+
+  // STEP 2: จัดเวร RS (Office 2)
+  workingDays.forEach(function(d, idx) {
+    var dow = d.getDay();
+    var dateKey = formatDateKey(d);
+    var tp = tpAssign[dateKey];
+    
+    // หา candidates
+    var candidates = allEmployees.filter(function(s) {
+      if (s === tp.A || s === tp.B) return false;
+      
+      // เช็ควันก่อนหน้า
+      if (idx > 0) {
+        var prevDate = workingDays[idx - 1];
+        var prevKey = formatDateKey(prevDate);
+        var prevTp = tpAssign[prevKey];
+        var prevRs = rsAssign[prevKey];
+        if (s === prevTp.A || s === prevTp.B || s === prevRs) return false;
+      }
+      
+      // เช็ควันถัดไป
+      if (idx < workingDays.length - 1) {
+        var nextDate = workingDays[idx + 1];
+        var nextKey = formatDateKey(nextDate);
+        var nextTp = tpAssign[nextKey];
+        if (s === nextTp.A || s === nextTp.B) return false;
+      }
+      
+      return true;
+    });
+    
+    // ---- Fallback ถ้าเคร่งมากจนไม่มี candidate ----
+    var fallbackLevel = 0;
+    
+    // (1) ผ่อนปรนเงื่อนไข "วันก่อนหน้า" ก่อน (Level 1)
+    // ยอมให้ทำงานติดกันได้ (แต่ห้ามชน TP พรุ่งนี้)
+    if (candidates.length === 0) {
+      fallbackLevel = 1;
+      allEmployees.forEach(function(s) {
+        // ห้ามเป็นคนที่เข้า TP วันนี้
+        if (s === tp.A || s === tp.B) return;
+        
+        // ห้ามเป็นคนที่มีเวร TP ในวันทำการถัดไป (ยังคง check look-ahead)
+        if (idx < workingDays.length - 1) {
+          var nextDate = workingDays[idx + 1];
+          var nextKey = formatDateKey(nextDate);
+          var nextTp = tpAssign[nextKey];
+          if (s === nextTp.A || s === nextTp.B) return;
+        }
+        
+        candidates.push(s);
+      });
+    }
+
+    // (2) ถ้ายังไม่มีอีก ผ่อนทั้ง prev/next เหลือแค่ไม่ชน TP วันนี้ (Level 2)
+    if (candidates.length === 0) {
+      fallbackLevel = 2;
+      candidates = allEmployees.filter(s => s !== tp.A && s !== tp.B);
+    }
+
+    if (candidates.length === 0) {
+      throw new Error('ไม่พบ Candidate สำหรับ RS ในวัน ' + dateKey);
+    }
+
+    // -------- เลือกกลุ่มเป้าหมาย B:A ~ 80:20 --------
+    var totalRs = rsGroupCounts.A + rsGroupCounts.B;
+    var targetGroup;
+    if (totalRs === 0) {
+      targetGroup = 'B';
+    } else {
+      var currentBRatio = rsGroupCounts.B / totalRs;
+      targetGroup = (currentBRatio < 0.8) ? 'B' : 'A';
+    }
+
+    var prefCandidates = candidates.filter(function(s) {
+      return (targetGroup === 'A' && A_LIST.indexOf(s) !== -1) ||
+             (targetGroup === 'B' && B_LIST.indexOf(s) !== -1);
+    });
+
+    var pool = prefCandidates.length > 0 ? prefCandidates : candidates;
+
+    // -------- เลือกคนที่มีการกระจายวันดีที่สุด (ใช้ findMinStaff) --------
+    var chosenRs = findMinStaff(pool, function(staff) {
+      var tempCounts = {};
+      for (var key in dowCountsAll[staff]) {
+        tempCounts[key] = dowCountsAll[staff][key];
+      }
+      tempCounts[dow] = (tempCounts[dow] || 0) + 1;
+      
+      var range = getDowRange(tempCounts);
+      var rangePenalty = Math.max(0, range - 2) * 10;
+      var currentDow = dowCountsAll[staff][dow] || 0;
+      var total = totalShifts[staff];
+      
+      // ลำดับเดียวกับ Python: total, range+penalty, currentDow, staff
+      return [total, range + rangePenalty, currentDow, staff];
+    });
+
+    rsAssign[dateKey] = chosenRs;
+    
+    // -------- สร้างคำอธิบายเหตุผล --------
+    var reasonParts = [];
+    reasonParts.push('เลือก ' + chosenRs);
+    
+    // แสดงเหตุผลการไม่เลือกคนอื่นๆ (สุ่มตัวอย่าง)
+    var excludedExamples = [];
+    var countEx = 0;
+    // สร้าง excluded map แบบคร่าวๆ เพื่อโชว์ในเหตุผล (ทำเฉพาะคนที่ไม่ได้ถูกเลือก)
+    // หมายเหตุ: ใน JS เราไม่ได้เก็บ excluded map ไว้ละเอียดเหมือน Python เพื่อประหยัด mem
+    // แต่ถ้าต้องการโชว์ ก็ต้อง re-check logic หรือเก็บไว้ตอน loop แรก
+    // เพื่อความง่าย จะข้ามส่วน excluded details ไปก่อน หรือใส่ logic ง่ายๆ
+    
+    if (fallbackLevel === 1) {
+      reasonParts.push('; [ผ่อนปรน: ยอมให้ทำงานติดกัน]');
+    } else if (fallbackLevel === 2) {
+      reasonParts.push('; [ผ่อนปรนสูง: ยอมให้ทำงานติดกันและ TP พรุ่งนี้]');
+    }
+    
+    // เช็คข้ามวันหยุด
+    if (idx > 0) {
+      var prevDate = workingDays[idx - 1];
+      var diffPrev = daysBetween(prevDate, d);
+      if (diffPrev > 1) {
+        reasonParts.push('; เช็คข้ามหยุด: ' + chosenRs + ' ไม่ได้ทำ ' + Utilities.formatDate(prevDate, tz, 'dd/MM/yyyy'));
+      }
+    }
+    
+    if (idx < workingDays.length - 1) {
+      var nextDate = workingDays[idx + 1];
+      var diffNext = daysBetween(d, nextDate);
+      if (diffNext > 1) {
+        var nextKey = formatDateKey(nextDate);
+        var nextTp = tpAssign[nextKey];
+        var nextTpStr = getDisplayName(nextTp.A, STAFF_NAMES) + ', ' + getDisplayName(nextTp.B, STAFF_NAMES);
+        reasonParts.push('; ข้ามหยุด→ ' + Utilities.formatDate(nextDate, tz, 'dd/MM/yyyy') + ': TP=' + nextTpStr);
+      }
+    }
+
+    rsReasons[dateKey] = reasonParts.join('');
+
+    // อัพเดทสถิติ
+    dowCountsAll[chosenRs][dow] = (dowCountsAll[chosenRs][dow] || 0) + 1;
+    totalShifts[chosenRs]++;
+
+    if (A_LIST.indexOf(chosenRs) !== -1) {
+      rsGroupCounts.A++;
+    } else {
+      rsGroupCounts.B++;
+    }
+  });
+
+  Logger.log('เสร็จสิ้นการจัดเวร RS');
+  Logger.log('เริ่มสร้างตาราง...');
+
+  // เริ่มสร้างตาราง
+  var rows = [];
+  var backgrounds = [];
+  var headerRow = ['วันที่', 'วัน', 'ทพ. - A', 'ทพ. - B', 'รส.', 'วันหยุด', 'หมายเหตุ/เหตุผล'];
+  rows.push(headerRow);
+  backgrounds.push(new Array(headerRow.length).fill('#4a86e8')); // Header Blue
+
+  var currentDate = new Date(year, 0, 1);
+  while (currentDate.getFullYear() === year) {
+    var dow = currentDate.getDay();
+    var dateKey = formatDateKey(currentDate);
+    var dayName = THAI_DAYS[dow];
+    var dateStr = Utilities.formatDate(currentDate, tz, 'dd/MM/yyyy');
+    
+    // กำหนดสีพื้นหลังสลับเดือน (ขาว สลับ เทาอ่อน)
+    var month = currentDate.getMonth();
+    var rowColor = (month % 2 === 0) ? '#ffffff' : '#f3f3f3';
+    
+    if (isWeekend(currentDate)) {
+      rows.push([dateStr, dayName, '-', '-', '-', '-', 'เสาร์-อาทิตย์ (ไม่จัดเวร)']);
+    } else if (isWorkingDay(currentDate)) {
+      var tp = tpAssign[dateKey];
+      var rs = rsAssign[dateKey];
+      var reason = rsReasons[dateKey] || '-';
+      
+      // แปลงเป็นชื่อจริง
+      var tpAName = getDisplayName(tp.A, STAFF_NAMES);
+      var tpBName = getDisplayName(tp.B, STAFF_NAMES);
+      var rsName = getDisplayName(rs, STAFF_NAMES);
+      
+      var remark = reason;
+      if (isSpecialWorkingDay(currentDate)) {
+        remark = SPECIAL_WORKING_DAYS[dateKey] + ' | ' + reason;
+      }
+      
+      rows.push([dateStr, dayName, tpAName, tpBName, rsName, '-', remark]);
+    } else if (isHoliday(currentDate)) {
+      var holidayName = THAI_HOLIDAYS_2026[dateKey] || 'วันหยุดราชการ';
+      rows.push([dateStr, dayName, '-', '-', '-', holidayName, 'วันหยุดราชการ (ไม่จัดเวร)']);
+    } else {
+      rows.push([dateStr, dayName, '-', '-', '-', '-', '(ไม่คาดคิด)']);
+    }
+    
+    backgrounds.push(new Array(headerRow.length).fill(rowColor));
+    
+    currentDate = new Date(currentDate.getTime() + msPerDay);
+  }
+
+  var range = sheet.getRange(1, 1, rows.length, rows[0].length);
+  range.setValues(rows);
+  range.setBackgrounds(backgrounds);
+  
+  // จัดรูปแบบ Header
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold').setFontColor('white');
+  sheet.setFrozenRows(1);
+  
+  sheet.autoResizeColumns(1, rows[0].length);
+  
+  // แสดงสรุป
+  SpreadsheetApp.getUi().alert(
+    'สร้างตารางเวรเสร็จสิ้น!\n\n' +
+    'วันทำการทั้งปี: ' + workingDays.length + ' วัน\n' +
+    'RS กลุ่ม B:A = ' + rsGroupCounts.B + ':' + rsGroupCounts.A + '\n' +
+    'ตรวจสอบได้ที่ชีท: ' + sheetName
+  );
+}
+
+// ---------- ANALYSIS SHEETS ----------
+function generateAnalysisSheets() {
+  var ss = SpreadsheetApp.getActive();
+  var scheduleSheet = ss.getSheetByName('Schedule2026');
+  
+  if (!scheduleSheet) {
+    SpreadsheetApp.getUi().alert('กรุณาสร้างตารางเวรก่อน (Generate 2026 Schedule)');
+    return;
+  }
+  
+  var lists = getNameLists_();
+  var A_LIST = lists.A_LIST;
+  var B_LIST = lists.B_LIST;
+  var STAFF_NAMES = lists.STAFF_NAMES;
+  var allEmployees = A_LIST.concat(B_LIST);
+  
+  // อ่านข้อมูลจาก Schedule2026
+  var data = scheduleSheet.getDataRange().getDisplayValues();
+  var headers = data[0];
+  
+  // หา column indexes
+  var colDate = headers.indexOf('วันที่');
+  var colDay = headers.indexOf('วัน');
+  var colTpA = headers.indexOf('ทพ. - A');
+  var colTpB = headers.indexOf('ทพ. - B');
+  var colRs = headers.indexOf('รส.');
+  
+  // นับสถิติ
+  var tpCounts = {};
+  var rsCounts = {};
+  var totalCounts = {};
+  var dowCounts = {};
+  var staffDetails = {};
+  var monthlyTpCounts = {}; // เก็บสถิติ TP รายเดือน
+  
+  allEmployees.forEach(function(name) {
+    tpCounts[name] = 0;
+    rsCounts[name] = 0;
+    totalCounts[name] = 0;
+    dowCounts[name] = {
+      'จันทร์': 0, 'อังคาร': 0, 'พุธ': 0, 'พฤหัสบดี': 0, 'ศุกร์': 0
+    };
+    staffDetails[name] = [];
+    
+    // Init monthly counts
+    monthlyTpCounts[name] = {};
+    for (var m = 1; m <= 12; m++) {
+      monthlyTpCounts[name][m] = 0;
+    }
+  });
+  
+  // สร้าง Map สำหรับแปลงชื่อแสดงผลกลับเป็นรหัส (Name -> Code)
+  var nameToCode = {};
+  allEmployees.forEach(function(code) {
+    var name = getDisplayName(code, STAFF_NAMES);
+    nameToCode[name] = code;
+    nameToCode[code] = code; // เผื่อกรณีในตารางเป็นรหัส
+  });
+
+  // วนข้อมูล
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var dateVal = row[colDate];
+    var dayName = row[colDay];
+    
+    var rawTpA = row[colTpA];
+    var rawTpB = row[colTpB];
+    var rawRs = row[colRs];
+    
+    // แปลงชื่อในตารางกลับเป็นรหัส (Code) เพื่อใช้เป็น Key ในการเก็บสถิติ
+    var tpA = nameToCode[rawTpA];
+    var tpB = nameToCode[rawTpB];
+    var rs = nameToCode[rawRs];
+    
+    // หาเดือนจาก dateVal (dd/MM/yyyy)
+    var month = null;
+    if (typeof dateVal === 'string') {
+      var parts = dateVal.split('/');
+      if (parts.length === 3) {
+        month = parseInt(parts[1], 10);
+      }
+    }
+    
+    if (tpA && staffDetails[tpA]) {
+      tpCounts[tpA]++;
+      totalCounts[tpA]++;
+      if (dowCounts[tpA] && dowCounts[tpA].hasOwnProperty(dayName)) {
+        dowCounts[tpA][dayName]++;
+      }
+      staffDetails[tpA].push({date: dateVal, day: dayName, type: 'TP'});
+      if (month && monthlyTpCounts[tpA]) monthlyTpCounts[tpA][month]++;
+    }
+    
+    if (tpB && staffDetails[tpB]) {
+      tpCounts[tpB]++;
+      totalCounts[tpB]++;
+      if (dowCounts[tpB] && dowCounts[tpB].hasOwnProperty(dayName)) {
+        dowCounts[tpB][dayName]++;
+      }
+      staffDetails[tpB].push({date: dateVal, day: dayName, type: 'TP'});
+      if (month && monthlyTpCounts[tpB]) monthlyTpCounts[tpB][month]++;
+    }
+    
+    if (rs && staffDetails[rs]) {
+      rsCounts[rs]++;
+      totalCounts[rs]++;
+      if (dowCounts[rs] && dowCounts[rs].hasOwnProperty(dayName)) {
+        dowCounts[rs][dayName]++;
+      }
+      staffDetails[rs].push({date: dateVal, day: dayName, type: 'RS'});
+    }
+  }
+  
+  // สร้าง Sheet 1: Summary
+  createSummarySheet(ss, allEmployees, A_LIST, B_LIST, tpCounts, rsCounts, totalCounts, STAFF_NAMES);
+  
+  // สร้าง Sheet 2: DoW Distribution
+  createDowDistributionSheet(ss, allEmployees, A_LIST, B_LIST, dowCounts, totalCounts, STAFF_NAMES);
+  
+  // สร้าง Sheet 3: Staff Details
+  createStaffDetailsSheet(ss, allEmployees, A_LIST, B_LIST, staffDetails, STAFF_NAMES);
+
+  // สร้าง Sheet 4: Monthly TP Summary
+  createMonthlyTpSummarySheet(ss, allEmployees, A_LIST, B_LIST, monthlyTpCounts, STAFF_NAMES);
+  
+  SpreadsheetApp.getUi().alert(
+    'สร้าง Analysis Sheets เสร็จสิ้น!\n\n' +
+    '1. Summary2026 - สรุปจำนวนเวรแต่ละคน\n' +
+    '2. DoW_Distribution2026 - การกระจายวันในสัปดาห์\n' +
+    '3. Staff_Details2026 - รายละเอียดเวรแต่ละคน\n' +
+    '4. Monthly_TP_Summary2026 - สรุปเวร TP รายเดือน'
+  );
+}
+
+function createMonthlyTpSummarySheet(ss, allEmployees, A_LIST, B_LIST, monthlyTpCounts, STAFF_NAMES) {
+  var sheetName = 'Monthly_TP_Summary2026';
+  var sheet = ss.getSheetByName(sheetName);
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  sheet = ss.insertSheet(sheetName);
+  
+  var rows = [];
+  var header = ['รหัสบุคลากร', 'ชื่อ', 'กลุ่ม'];
+  var thaiMonths = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  header = header.concat(thaiMonths);
+  header.push('รวม');
+  
+  rows.push(header);
+  
+  allEmployees.forEach(function(name) {
+    var group = A_LIST.indexOf(name) !== -1 ? 'A' : 'B';
+    var row = [name, getDisplayName(name, STAFF_NAMES), group];
+    var total = 0;
+    
+    for (var m = 1; m <= 12; m++) {
+      var count = monthlyTpCounts[name][m] || 0;
+      row.push(count);
+      total += count;
+    }
+    row.push(total);
+    rows.push(row);
+  });
+  
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  
+  // จัดรูปแบบ
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+  sheet.autoResizeColumns(1, rows[0].length);
+  sheet.setFrozenRows(1);
+  
+  // Conditional formatting สำหรับกลุ่ม A (ควรเป็น 2-3)
+  // คอลัมน์ D (index 4) ถึง O (index 15) คือ ม.ค.-ธ.ค.
+  var monthRange = sheet.getRange(2, 4, rows.length - 1, 12);
+  
+  // สีเขียวอ่อน ถ้าเป็น 2 หรือ 3
+  var ruleGood = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND($C2="A", OR(D2=2, D2=3))')
+    .setBackground('#b7e1cd')
+    .setRanges([monthRange])
+    .build();
+    
+  // สีแดงอ่อน ถ้า > 3
+  var ruleBad = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND($C2="A", D2>3)')
+    .setBackground('#f4c7c3')
+    .setRanges([monthRange])
+    .build();
+    
+  // สีเหลืองอ่อน ถ้า < 2 (คือ 0 หรือ 1)
+  var ruleLow = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND($C2="A", D2<2)')
+    .setBackground('#fff2cc')
+    .setRanges([monthRange])
+    .build();
+
+  sheet.setConditionalFormatRules([ruleGood, ruleBad, ruleLow]);
+}
+
+function createSummarySheet(ss, allEmployees, A_LIST, B_LIST, tpCounts, rsCounts, totalCounts, STAFF_NAMES) {
+  var sheetName = 'Summary2026';
+  var sheet = ss.getSheetByName(sheetName);
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  sheet = ss.insertSheet(sheetName);
+  
+  var rows = [];
+  rows.push(['รหัสบุคลากร', 'ชื่อ', 'กลุ่ม', 'จำนวนเวร ทพ.', 'จำนวนเวร รส.', 'รวมทั้งหมด']);
+  
+  allEmployees.forEach(function(name) {
+    var group = A_LIST.indexOf(name) !== -1 ? 'A' : 'B';
+    rows.push([
+      name,
+      getDisplayName(name, STAFF_NAMES),
+      group,
+      tpCounts[name] || 0,
+      rsCounts[name] || 0,
+      totalCounts[name] || 0
+    ]);
+  });
+  
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  
+  // จัดรูปแบบ
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+  sheet.autoResizeColumns(1, rows[0].length);
+  sheet.setFrozenRows(1);
+}
+
+function createDowDistributionSheet(ss, allEmployees, A_LIST, B_LIST, dowCounts, totalCounts, STAFF_NAMES) {
+  var sheetName = 'DoW_Distribution2026';
+  var sheet = ss.getSheetByName(sheetName);
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  sheet = ss.insertSheet(sheetName);
+  
+  var rows = [];
+  rows.push(['รหัสบุคลากร', 'ชื่อ', 'กลุ่ม', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'รวม', 'ส่วนต่าง']);
+  
+  var daysOrder = ['จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์'];
+  
+  allEmployees.forEach(function(name) {
+    var group = A_LIST.indexOf(name) !== -1 ? 'A' : 'B';
+    var counts = daysOrder.map(day => dowCounts[name][day] || 0);
+    var total = totalCounts[name] || 0;
+    var max = Math.max.apply(null, counts);
+    var min = Math.min.apply(null, counts);
+    var diff = max - min;
+    
+    rows.push([
+      name,
+      getDisplayName(name, STAFF_NAMES),
+      group,
+      counts[0], // จันทร์
+      counts[1], // อังคาร
+      counts[2], // พุธ
+      counts[3], // พฤหัสบดี
+      counts[4], // ศุกร์
+      total,
+      diff
+    ]);
+  });
+  
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  
+  // จัดรูปแบบ
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+  sheet.autoResizeColumns(1, rows[0].length);
+  sheet.setFrozenRows(1);
+  
+  // Conditional formatting สำหรับส่วนต่าง
+  var diffRange = sheet.getRange(2, 9, rows.length - 1, 1);
+  var rule1 = SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberLessThanOrEqualTo(2)
+    .setBackground('#b7e1cd')
+    .setRanges([diffRange])
+    .build();
+  var rule2 = SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberGreaterThan(4)
+    .setBackground('#f4c7c3')
+    .setRanges([diffRange])
+    .build();
+  sheet.setConditionalFormatRules([rule1, rule2]);
+}
+
+function createStaffDetailsSheet(ss, allEmployees, A_LIST, B_LIST, staffDetails, STAFF_NAMES) {
+  // 1. เตรียมข้อมูลดิบ (Raw Data)
+  var rawData = [];
+  rawData.push(['รหัสบุคลากร', 'ชื่อ', 'กลุ่ม', 'ประเภทเวร', 'วันที่', 'วัน']);
+  
+  var nameList = [];
+  
+  allEmployees.forEach(function(name) {
+    var displayName = getDisplayName(name, STAFF_NAMES);
+    nameList.push(displayName);
+    
+    var group = A_LIST.indexOf(name) !== -1 ? 'A' : 'B';
+    var details = staffDetails[name] || [];
+    
+    details.forEach(function(detail) {
+      // แปลงวันที่เป็น Date Object เพื่อให้เป็นชนิดข้อมูลที่ถูกต้อง
+      var dateVal = detail.date;
+      if (typeof dateVal === 'string') {
+        var parts = dateVal.split('/');
+        if (parts.length === 3) {
+          // สมมติว่าเป็น dd/MM/yyyy
+          var d = parseInt(parts[0], 10);
+          var m = parseInt(parts[1], 10) - 1;
+          var y = parseInt(parts[2], 10);
+          if (y > 2400) y -= 543; // แปลง พ.ศ. เป็น ค.ศ.
+          dateVal = new Date(y, m, d);
+        }
+      }
+      
+      var typeDisplay = detail.type;
+      if (typeDisplay === 'TP') typeDisplay = 'ทพ.';
+      else if (typeDisplay === 'RS') typeDisplay = 'รส.';
+
+      rawData.push([
+        name,
+        displayName,
+        group,
+        typeDisplay,
+        dateVal,
+        detail.day
+      ]);
+    });
+  });
+  
+  // เรียงชื่อสำหรับ Dropdown
+  nameList.sort();
+
+  // 2. สร้าง Sheet เก็บข้อมูลดิบ (Database) - ซ่อนไว้
+  var dbSheetName = 'Staff_Data_DB';
+  var dbSheet = ss.getSheetByName(dbSheetName);
+  if (dbSheet) {
+    ss.deleteSheet(dbSheet);
+  }
+  dbSheet = ss.insertSheet(dbSheetName);
+  dbSheet.getRange(1, 1, rawData.length, rawData[0].length).setValues(rawData);
+  // จัด format วันที่ใน DB
+  dbSheet.getRange(2, 5, rawData.length - 1, 1).setNumberFormat('dd/MM/yyyy');
+  dbSheet.hideSheet(); // ซ่อน Sheet นี้
+
+  // 3. สร้าง Sheet สำหรับค้นหา (Search Interface)
+  var sheetName = 'Staff_Details2026';
+  var sheet = ss.getSheetByName(sheetName);
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  sheet = ss.insertSheet(sheetName);
+  
+  // สร้าง UI ค้นหา
+  sheet.getRange('B2').setValue('เลือกชื่อบุคลากร:').setFontWeight('bold').setHorizontalAlignment('right');
+  
+  var searchCell = sheet.getRange('C2');
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(nameList)
+    .setAllowInvalid(false)
+    .build();
+  searchCell.setDataValidation(rule);
+  searchCell.setBackground('#fff2cc'); // สีพื้นหลังช่องเลือก
+
+  // เพิ่ม Dropdown เลือกสถานที่
+  sheet.getRange('E2').setValue('เลือกสถานที่:').setFontWeight('bold').setHorizontalAlignment('right');
+  var typeCell = sheet.getRange('F2');
+  var typeRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['ทพ. และ รส.', 'ทพ.', 'รส.'])
+    .setAllowInvalid(false)
+    .build();
+  typeCell.setDataValidation(typeRule);
+  typeCell.setValue('ทพ. และ รส.'); // Default value
+  typeCell.setBackground('#fff2cc');
+  
+  // สร้างหัวตารางผลลัพธ์ (เพิ่ม 'ลำดับ' และตัด 'กลุ่ม' ออก)
+  var headers = ['ลำดับ', 'รหัสบุคลากร', 'ชื่อ', 'ประเภทเวร', 'วันที่', 'วัน'];
+  sheet.getRange(4, 1, 1, 6).setValues([headers])
+       .setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+       
+  // ใส่สูตร FILTER ดึงข้อมูลจาก DB
+  // เลือกคอลัมน์ A, B, D, E, F (ข้าม C=กลุ่ม)
+  // เงื่อนไข: ชื่อตรงกับ C2 และ (ประเภทตรงกับ F2 หรือ F2="ทพ. และ รส.")
+  // ใช้ logic (A + B) แทน OR เพื่อให้ทำงานกับ ArrayFormula ได้ถูกต้องใน FILTER
+  var formula = '=IF(C2="", "<- กรุณาเลือกรายชื่อในช่อง C2", ' +
+                'IFNA(SORT(FILTER({Staff_Data_DB!A2:B, Staff_Data_DB!D2:F}, ' +
+                'Staff_Data_DB!B2:B = C2, ' +
+                '((F2="ทพ. และ รส.") + (F2="") + (Staff_Data_DB!D2:D = F2))), 4, TRUE), "ไม่พบข้อมูล"))';
+  
+  sheet.getRange('B5').setFormula(formula);
+
+  // สูตรลำดับที่ A5
+  var seqFormula = '=IF(OR(C2="", B5="<- กรุณาเลือกรายชื่อในช่อง C2", B5="ไม่พบข้อมูล"), "", SEQUENCE(COUNTA(B5:B)))';
+  sheet.getRange('A5').setFormula(seqFormula);
+  
+  // จัดรูปแบบ
+  sheet.setColumnWidth(1, 50);  // Seq
+  sheet.setColumnWidth(2, 100); // ID
+  sheet.setColumnWidth(3, 150); // Name
+  sheet.setColumnWidth(4, 80);  // Type
+  sheet.setColumnWidth(5, 100); // Date
+  sheet.setColumnWidth(6, 80);  // Day
+  
+  // จัดกึ่งกลางลำดับ
+  sheet.getRange('A5:A').setHorizontalAlignment('center');
+
+  // จัดกึ่งกลางและ Format วันที่สำหรับคอลัมน์ E (วันที่)
+  var dateCol = sheet.getRange('E5:E');
+  dateCol.setHorizontalAlignment('center');
+  dateCol.setNumberFormat('dd/MM/yyyy');
+  
+  // Freeze ส่วนหัว
+  sheet.setFrozenRows(4);
+}
+
+// ---------- HOLIDAYS SHEET ----------
+function generateHolidaysSheet() {
+  var ss = SpreadsheetApp.getActive();
+  var sheetName = 'Holidays2026';
+  var sheet = ss.getSheetByName(sheetName);
+  
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  sheet = ss.insertSheet(sheetName);
+  
+  var tz = ss.getSpreadsheetTimeZone() || 'Asia/Bangkok';
+  var rows = [];
+  rows.push(['วันที่', 'วัน', 'ชื่อวันหยุด', 'ประเภท']);
+  
+  // แปลง THAI_HOLIDAYS_2026 เป็น array และเรียงตามวันที่
+  var holidays = [];
+  for (var dateKey in THAI_HOLIDAYS_2026) {
+    if (THAI_HOLIDAYS_2026.hasOwnProperty(dateKey)) {
+      var parts = dateKey.split('-');
+      var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+      holidays.push({
+        date: d,
+        dateKey: dateKey,
+        name: THAI_HOLIDAYS_2026[dateKey]
+      });
+    }
+  }
+  
+  // เรียงตามวันที่
+  holidays.sort(function(a, b) {
+    return a.date - b.date;
+  });
+  
+  // สร้างแถวข้อมูล
+  holidays.forEach(function(holiday) {
+    var dateStr = Utilities.formatDate(holiday.date, tz, 'dd/MM/yyyy');
+    var dow = holiday.date.getDay();
+    var dayName = THAI_DAYS[dow];
+    
+    rows.push([
+      dateStr,
+      dayName,
+      holiday.name,
+      'วันหยุดราชการ'
+    ]);
+  });
+  
+  // เพิ่มวันทำงานพิเศษ
+  var specialDays = [];
+  for (var dateKey in SPECIAL_WORKING_DAYS) {
+    if (SPECIAL_WORKING_DAYS.hasOwnProperty(dateKey)) {
+      var parts = dateKey.split('-');
+      var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+      specialDays.push({
+        date: d,
+        dateKey: dateKey,
+        name: SPECIAL_WORKING_DAYS[dateKey]
+      });
+    }
+  }
+  
+  // เรียงตามวันที่
+  specialDays.sort(function(a, b) {
+    return a.date - b.date;
+  });
+  
+  // เพิ่มวันทำงานพิเศษ
+  specialDays.forEach(function(special) {
+    var dateStr = Utilities.formatDate(special.date, tz, 'dd/MM/yyyy');
+    var dow = special.date.getDay();
+    var dayName = THAI_DAYS[dow];
+    
+    rows.push([
+      dateStr,
+      dayName,
+      special.name,
+      'วันทำงานพิเศษ'
+    ]);
+  });
+  
+  // เขียนข้อมูลลง sheet
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  
+  // จัดรูปแบบ header
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+  
+  // จัดรูปแบบตามประเภท
+  for (var i = 2; i <= rows.length; i++) {
+    var type = rows[i-1][3];
+    if (type === 'วันหยุดราชการ') {
+      sheet.getRange(i, 1, 1, rows[0].length).setBackground('#f4cccc');
+    } else if (type === 'วันทำงานพิเศษ') {
+      sheet.getRange(i, 1, 1, rows[0].length).setBackground('#fff2cc');
+    }
+  }
+  
+  sheet.autoResizeColumns(1, rows[0].length);
+  sheet.setFrozenRows(1);
+  
+  SpreadsheetApp.getUi().alert(
+    'สร้างชีทวันหยุดเสร็จสิ้น!\n\n' +
+    'วันหยุดราชการ: ' + holidays.length + ' วัน\n' +
+    'วันทำงานพิเศษ: ' + specialDays.length + ' วัน\n' +
+    'ตรวจสอบได้ที่ชีท: ' + sheetName
+  );
+}
+
+// ---------- MONTHLY CALENDAR SHEETS ----------
+function generateMonthlyCalendars() {
+  var ss = SpreadsheetApp.getActive();
+  var scheduleSheet = ss.getSheetByName('Schedule2026');
+  
+  if (!scheduleSheet) {
+    SpreadsheetApp.getUi().alert('กรุณาสร้างตารางเวรก่อน (Generate 2026 Schedule)');
+    return;
+  }
+  
+  var lists = getNameLists_();
+  var A_LIST = lists.A_LIST;
+  var B_LIST = lists.B_LIST;
+  var STAFF_NAMES = lists.STAFF_NAMES;
+  
+  var tz = ss.getSpreadsheetTimeZone() || 'Asia/Bangkok';
+  var year = 2026;
+  
+  // อ่านข้อมูลจาก Schedule2026
+  var dataRange = scheduleSheet.getDataRange();
+  var data = dataRange.getValues();
+  var displayData = dataRange.getDisplayValues();
+  var scheduleData = {};
+
+  function parseDateValue(value, displayValue) {
+    // Priority 1: Parse display string as dd/MM/yyyy to ensure visual consistency
+    if (typeof displayValue === 'string') {
+      var trimmed = displayValue.trim();
+      if (trimmed && trimmed !== '-') {
+        var parts = trimmed.split('/');
+        if (parts.length === 3) {
+          var day = parseInt(parts[0], 10);
+          var month = parseInt(parts[1], 10) - 1;
+          var year = parseInt(parts[2], 10);
+          if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
+            if (year > 2400) {
+              year -= 543; // แปลง พ.ศ. เป็น ค.ศ.
+            }
+            return new Date(year, month, day);
+          }
+        }
+      }
+    }
+
+    // Priority 2: Use Date object if available
+    if (value instanceof Date) {
+      return new Date(value.getTime());
+    }
+    
+    return null;
+  }
+  
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var displayRow = displayData[i];
+    var rawDate = row[0];
+    var displayDate = displayRow[0];
+    var parsedDate = parseDateValue(rawDate, displayDate);
+    if (!parsedDate) {
+      continue;
+    }
+    var displayKey = Utilities.formatDate(parsedDate, tz, 'dd/MM/yyyy');
+
+    scheduleData[displayKey] = {
+      day: row[1],
+      tpA: row[2],
+      tpB: row[3],
+      rs: row[4],
+      holiday: row[5],
+      remark: row[6]
+    };
+  }
+  
+  var thaiMonths = [
+    'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
+    'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'
+  ];
+  
+  // สร้างปฏิทินแต่ละเดือน
+  for (var month = 0; month < 12; month++) {
+    createMonthlyCalendar(ss, year, month, thaiMonths[month], scheduleData, tz);
+  }
+  
+  SpreadsheetApp.getUi().alert(
+    'สร้างปฏิทินรายเดือนเสร็จสิ้น!\n\n' +
+    'สร้างปฏิทิน 12 เดือน\n' +
+    'ตรวจสอบได้ที่ชีท: มกราคม, กุมภาพันธ์, ..., ธันวาคม'
+  );
+}
+
+function createMonthlyCalendar(ss, year, month, monthName, scheduleData, tz) {
+  var sheet = ss.getSheetByName(monthName);
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  // แทรกชีทตามลำดับเดือน (0 = ม.ค. อยู่หน้าสุด)
+  sheet = ss.insertSheet(monthName, month);
+  
+  // หาวันแรกและวันสุดท้ายของเดือน
+  var firstDay = new Date(year, month, 1);
+  var lastDay = new Date(year, month + 1, 0);
+  var numDays = lastDay.getDate();
+  
+  // หาว่าวันที่ 1 ตรงกับวันอะไร (0=อาทิตย์, 6=เสาร์)
+  var startDow = firstDay.getDay();
+  
+  // สร้าง header
+  var rows = [];
+  
+  // แถวที่ 1: ชื่อเดือน
+  rows.push([monthName + ' 2026', '', '', '', '', '', '']);
+  
+  // แถวที่ 2: วันในสัปดาห์
+  rows.push(['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์']);
+  
+  // สร้างปฏิทิน
+  var currentRow = [];
+  var day = 1;
+  
+  // เติมช่องว่างก่อนวันที่ 1
+  for (var i = 0; i < startDow; i++) {
+    currentRow.push('');
+  }
+  
+  // เติมวันที่
+  while (day <= numDays) {
+    var d = new Date(year, month, day);
+    var dow = d.getDay(); // 0=อาทิตย์, 6=เสาร์
+    var dateStr = Utilities.formatDate(d, tz, 'dd/MM/yyyy');
+    var dateKey = Utilities.formatDate(d, tz, 'yyyy-MM-dd'); // สำหรับเช็ควันหยุด
+    
+    var cellContent = day.toString();
+    
+    // ตรวจสอบวันหยุดก่อน
+    var isHoliday = THAI_HOLIDAYS_2026.hasOwnProperty(dateKey);
+    
+    // เสาร์-อาทิตย์ให้แสดงเฉพาะวันที่
+    if (dow === 0 || dow === 6) {
+      currentRow.push(cellContent);
+    } else if (isHoliday) {
+      // วันหยุดราชการ
+      cellContent += '\n' + THAI_HOLIDAYS_2026[dateKey];
+      currentRow.push(cellContent);
+    } else if (scheduleData[dateStr]) {
+      // วันทำงาน - เพิ่มข้อมูลจากตารางเวร (แสดงเท่าที่มี)
+      var schedule = scheduleData[dateStr];
+      var tpA = schedule.tpA && schedule.tpA !== '-' ? schedule.tpA : '';
+      var tpB = schedule.tpB && schedule.tpB !== '-' ? schedule.tpB : '';
+      var rs = schedule.rs && schedule.rs !== '-' ? schedule.rs : '';
+      var remark = schedule.remark && schedule.remark !== '-' ? schedule.remark : '';
+      if (remark && (remark.indexOf('เสาร์-อาทิตย์') > -1 || remark.indexOf('วันหยุดราชการ') > -1)) {
+        remark = '';
+      }
+
+      if (tpA || tpB) {
+        var tpParts = [];
+        if (tpA) tpParts.push(tpA);
+        if (tpB) tpParts.push(tpB);
+        cellContent += '\nทพ.: ' + tpParts.join(', ');
+      }
+      if (rs) {
+        cellContent += '\nรส.: ' + rs;
+      }
+      // ไม่แสดงหมายเหตุในปฏิทิน
+
+
+      currentRow.push(cellContent);
+    } else {
+      // ถ้าไม่มีข้อมูลในตาราง ให้แสดงเฉพาะวันที่
+      currentRow.push(cellContent);
+    }
+    
+    // ถ้าครบ 7 วัน (สัปดาห์) ให้ขึ้นแถวใหม่
+    if (currentRow.length === 7) {
+      rows.push(currentRow);
+      currentRow = [];
+    }
+    
+    day++;
+  }
+  
+  // เติมช่องว่างหลังวันสุดท้าย
+  while (currentRow.length > 0 && currentRow.length < 7) {
+    currentRow.push('');
+  }
+  if (currentRow.length > 0) {
+    rows.push(currentRow);
+  }
+  
+  // เขียนข้อมูลลง sheet
+  sheet.getRange(1, 1, rows.length, 7).setValues(rows);
+  
+  // จัดรูปแบบ
+  // แถวที่ 1: ชื่อเดือน
+  sheet.getRange(1, 1, 1, 7).merge()
+    .setFontWeight('bold')
+    .setFontSize(14)
+    .setHorizontalAlignment('center')
+    .setBackground('#4a86e8')
+    .setFontColor('white');
+  
+  // แถวที่ 2: หัววัน
+  sheet.getRange(2, 1, 1, 7)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center')
+    .setBackground('#6fa8dc')
+    .setFontColor('white');
+  
+  // ตั้งค่าความสูงของแถว
+  sheet.setRowHeight(1, 40);
+  sheet.setRowHeight(2, 30);
+  for (var r = 3; r <= rows.length; r++) {
+    sheet.setRowHeight(r, 80);
+  }
+  
+  // ตั้งค่าความกว้างของคอลัมน์
+  for (var c = 1; c <= 7; c++) {
+    sheet.setColumnWidth(c, 150);
+  }
+  
+  // จัดรูปแบบเซลล์วันที่
+  for (var r = 3; r <= rows.length; r++) {
+    for (var c = 1; c <= 7; c++) {
+      var cell = sheet.getRange(r, c);
+      cell.setVerticalAlignment('top')
+          .setWrap(true)
+          .setBorder(true, true, true, true, true, true);
+      
+      // จัดชิดซ้ายทั้งหมด (เพื่อให้ตัวเลขวันอยู่ที่มุมซ้ายบน)
+      cell.setHorizontalAlignment('left');
+
+      var value = cell.getValue();
+      
+      // สีพื้นหลังสำหรับวันหยุด (ตรวจสอบจากข้อความในเซลล์)
+      if (!value || value === '') {
+        // ช่องว่าง - ไม่ต้องทำอะไร
+      } else if (value.toString().indexOf('วัน') > -1 && 
+                 (value.toString().indexOf('ขึ้นปี') > -1 ||
+                  value.toString().indexOf('ชดเชย') > -1 ||
+                  value.toString().indexOf('มาฆบูชา') > -1 ||
+                  value.toString().indexOf('จักรี') > -1 ||
+                  value.toString().indexOf('สงกรานต์') > -1 ||
+                  value.toString().indexOf('ฉัตรมงคล') > -1 ||
+                  value.toString().indexOf('พืชมงคล') > -1 ||
+                  value.toString().indexOf('วิสาขบูชา') > -1 ||
+                  value.toString().indexOf('พระชนมพรรษา') > -1 ||
+                  value.toString().indexOf('อาสาฬหบูชา') > -1 ||
+                  value.toString().indexOf('เข้าพรรษา') > -1 ||
+                  value.toString().indexOf('แม่แห่งชาติ') > -1 ||
+                  value.toString().indexOf('นวมินทรมหาราช') > -1 ||
+                  value.toString().indexOf('ปิยมหาราช') > -1 ||
+                  value.toString().indexOf('รัฐธรรมนูญ') > -1 ||
+                  value.toString().indexOf('สิ้นปี') > -1)) {
+        cell.setBackground('#f4cccc');
+      } else if (c === 1 || c === 7) { // อาทิตย์และเสาร์
+        cell.setBackground('#efefef');
+      }
+    }
+  }
+  
+  sheet.setFrozenRows(2);
+}
+
+// ---------- CONDITIONS SHEET ----------
+function generateConditionsSheet() {
+  var ss = SpreadsheetApp.getActive();
+  var sheetName = 'เงื่อนไขการจัดเวร';
+  var sheet = ss.getSheetByName(sheetName);
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  sheet = ss.insertSheet(sheetName);
+  
+  var rows = [];
+  rows.push(['เงื่อนไขและข้อกำหนดการจัดเวร (Scheduling Rules & Conditions)']);
+  rows.push(['']);
+  
+  rows.push(['1. โครงสร้างบุคลากร (Staff Structure)']);
+  rows.push(['   - กลุ่ม A (Group A): ตามรายชื่อในชีท Name list (Column A-B)']);
+  rows.push(['   - กลุ่ม B (Group B): ตามรายชื่อในชีท Name list (Column C-D)']);
+  rows.push(['']);
+  
+  rows.push(['2. วันและเวลาทำการ (Working Days)']);
+  rows.push(['   - เดือน ม.ค., ก.พ., ก.ค., ส.ค.: จัดเวร จันทร์ - ศุกร์']);
+  rows.push(['   - เดือนอื่นๆ: จัดเวรเฉพาะ จันทร์, อังคาร, พฤหัสบดี (หยุด พุธ, ศุกร์)']);
+  rows.push(['   - หยุดวันเสาร์ - อาทิตย์ (Sat-Sun)']);
+  rows.push(['   - หยุดวันหยุดราชการ (Public Holidays) ตามประกาศ']);
+  rows.push(['   - ยกเว้น วันทำงานพิเศษ (Special Working Days) ที่ระบุไว้ให้จัดเวรตามปกติ']);
+  rows.push(['']);
+  
+  rows.push(['3. เวร TP (ท่าพระจันทร์) / Office 1']);
+  rows.push(['   - จำนวน: 2 คน/วัน']);
+  rows.push(['   - องค์ประกอบ: ต้องมีกลุ่ม A 1 คน และ กลุ่ม B 1 คน']);
+  rows.push(['   - เงื่อนไขการเลือกกลุ่ม A:']);
+  rows.push(['     1. พยายามกระจายเวรให้ได้ประมาณ 2-3 ครั้ง/เดือน']);
+  rows.push(['     2. ไม่เลือกคนที่เพิ่งเข้าเวร TP ไปในช่วง 2 วันล่าสุด (เว้นระยะ)']);
+  rows.push(['     3. กระจายวันในสัปดาห์ (จันทร์-ศุกร์) ให้สมดุล']);
+  rows.push(['   - เงื่อนไขการเลือกกลุ่ม B:']);
+  rows.push(['     1. ต้องมีเวรอย่างน้อย 1 ครั้ง/เดือน']);
+  rows.push(['     2. ไม่เลือกคนที่เพิ่งเข้าเวร TP ไปในช่วง 2 วันล่าสุด']);
+  rows.push(['     3. กระจายวันในสัปดาห์ให้สมดุล']);
+  rows.push(['']);
+  
+  rows.push(['4. เวร RS (รังสิต) / Office 2']);
+  rows.push(['   - จำนวน: 1 คน/วัน']);
+  rows.push(['   - องค์ประกอบ: เลือกจากกลุ่ม A หรือ B ก็ได้']);
+  rows.push(['   - สัดส่วนเป้าหมาย: พยายามให้เป็นกลุ่ม B ประมาณ 80% และกลุ่ม A ประมาณ 20%']);
+  rows.push(['   - ข้อห้าม (Constraints):']);
+  rows.push(['     1. ห้ามซ้ำกับคนที่เข้าเวร TP ในวันเดียวกัน (TP วันนี้)']);
+  rows.push(['     2. ห้ามเป็นคนที่เพิ่งทำงานในวันทำการก่อนหน้า (ทำเมื่อวาน)']);
+  rows.push(['     3. ห้ามเป็นคนที่มีเวร TP ในวันทำการถัดไป (TP พรุ่งนี้)']);
+  rows.push(['   - การผ่อนปรน (Fallback):']);
+  rows.push(['     * หากหาคนไม่ได้ตามเงื่อนไข จะยอมผ่อนปรนข้อห้ามที่ 2 (ทำเมื่อวาน) ก่อน']);
+  rows.push(['     * หากยังไม่ได้ จะยอมผ่อนปรนข้อห้ามที่ 3 (TP พรุ่งนี้)']);
+  rows.push(['   - เกณฑ์การเลือก:']);
+  rows.push(['     1. เลือกคนที่มีจำนวนเวรรวมน้อยที่สุด']);
+  rows.push(['     2. กระจายวันในสัปดาห์ให้สมดุล']);
+  
+  sheet.getRange(1, 1, rows.length, 1).setValues(rows);
+  
+  // จัดรูปแบบ
+  sheet.getRange('A1').setFontWeight('bold').setFontSize(14);
+  sheet.getRange(1, 1, rows.length, 1).setWrapStrategy(SpreadsheetApp.WrapStrategy.WRAP);
+  sheet.setColumnWidth(1, 600);
+  
+  // Highlight หัวข้อหลัก
+  var boldRows = [1, 3, 7, 13, 22];
+  boldRows.forEach(function(r) {
+    sheet.getRange(r, 1).setFontWeight('bold').setBackground('#f3f3f3');
+  });
+  
+  SpreadsheetApp.getUi().alert('สร้างชีท "เงื่อนไขการจัดเวร" เสร็จสิ้น');
+}
