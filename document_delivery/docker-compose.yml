@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  delivery_web:
+    build: .
+    container_name: delivery_system
+    ports:
+      - "8082:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      - TZ=Asia/Bangkok
+      # Credentials must match the existing DB in php/docker-compose.yml
+      - DB_HOST=db
+      - DB_NAME=shift_scheduler
+      - DB_USER=scheduler_user
+      - DB_PASS=scheduler_secure_pass_2026
+    networks:
+      - scheduler_network
+
+networks:
+  scheduler_network:
+    external: true
+    name: php_scheduler_network
